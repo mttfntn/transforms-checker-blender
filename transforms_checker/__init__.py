@@ -1,15 +1,22 @@
-bl_info = {
-    "name": "Transforms Checker",
-    "author": "Matteo Fontana",
-    "version": (1, 0, 0),
-    "blender": (4, 2, 0),
-    "location": "View3D > Sidebar (N) > Transforms",
-    "description": "Find objects whose location, rotation or scale has not been applied",
-    "category": "Object",
-}
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Transforms Checker: find and apply unapplied object transforms in Blender.
+
+Adds a "Transforms" tab to the 3D Viewport sidebar (N panel). The flow is:
+
+1. Scan: ``rescan()`` walks the scene (``candidate_objects()``), runs
+   ``check_object()`` on each object and stores the flagged ones in the scene's
+   ``TC_Settings.results`` collection.
+2. Display: the panel and list re-run ``check_object()`` while drawing, so rows
+   always show the current state, and objects fixed since the scan drop out
+   (``live_results()``).
+3. Act: operators select the flagged objects, or apply their transforms
+   through Blender's own ``object.transform_apply`` (``apply_transforms()``).
+
+Settings live on the scene (``Scene.transforms_checker``), so they are saved with
+the .blend file. Changing an option re-scans automatically once a scan has run.
+"""
 
 import bpy
-from mathutils import Quaternion
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -17,10 +24,13 @@ from bpy.props import (
     FloatProperty,
     IntProperty,
     PointerProperty,
+    StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup, UIList
+from mathutils import Quaternion
 
 
+# Object types offered in the "Object Types" filter (identifiers are Object.type values).
 OBJECT_TYPES = [
     ("MESH", "Mesh", ""),
     ("CURVE", "Curve", ""),
@@ -40,6 +50,8 @@ OBJECT_TYPES = [
     ("SPEAKER", "Speaker", ""),
 ]
 
+# Checked by default: types whose geometry is affected by applying transforms.
+# Empties, cameras, lights, probes and speakers are usually placed on purpose.
 DEFAULT_TYPES = {
     "MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES",
     "POINTCLOUD", "VOLUME", "GREASEPENCIL", "ARMATURE", "LATTICE",
@@ -50,37 +62,64 @@ DEFAULT_TYPES = {
 # Core check
 # ---------------------------------------------------------------------------
 
+def _rotation_quaternion(obj):
+    """Return the object's local rotation as a quaternion, whatever its rotation mode."""
+    if obj.rotation_mode == "QUATERNION":
+        return obj.rotation_quaternion.normalized()
+    if obj.rotation_mode == "AXIS_ANGLE":
+        angle, x, y, z = obj.rotation_axis_angle
+        # A zero axis means no rotation (Quaternion() would fail to normalize it).
+        return Quaternion((x, y, z), angle) if (x or y or z) else Quaternion()
+    return obj.rotation_euler.to_quaternion()
+
+
 def check_object(obj, settings):
-    """Return (loc, rot, scale, negative_scale) flags for unapplied transforms."""
+    """Report which transforms of ``obj`` are not applied.
+
+    Returns ``(loc, rot, scale, negative)``. The first three are False when the
+    matching check is disabled in ``settings``. ``negative`` is True when any
+    scale axis is negative, whatever the settings. With ``include_delta`` the
+    delta transforms count too: deltas add to location, multiply scale and
+    compose with rotation (so a delta that cancels the rotation is not flagged).
+    Values within ``settings.tolerance`` of identity count as applied.
+    """
     tol = settings.tolerance
 
     loc_vals = list(obj.location)
     scale_vals = list(obj.scale)
-    rot_quat = obj.rotation_euler.to_quaternion() if obj.rotation_mode not in {
-        "QUATERNION", "AXIS_ANGLE"} else None
-    if obj.rotation_mode == "QUATERNION":
-        rot_quat = obj.rotation_quaternion.normalized()
-    elif obj.rotation_mode == "AXIS_ANGLE":
-        angle, x, y, z = obj.rotation_axis_angle
-        rot_quat = Quaternion((x, y, z), angle) if (x or y or z) else Quaternion()
+    rot_quat = _rotation_quaternion(obj)
 
     if settings.include_delta:
         loc_vals += list(obj.delta_location)
         scale_vals += list(obj.delta_scale)
+        # Blender uses the delta quaternion only in QUATERNION mode, else the delta euler.
         delta_q = (obj.delta_rotation_quaternion.normalized()
                    if obj.rotation_mode == "QUATERNION"
                    else obj.delta_rotation_euler.to_quaternion())
         rot_quat = delta_q @ rot_quat
 
     loc = settings.check_location and any(abs(v) > tol for v in loc_vals)
-    # Quaternion q and -q are the same rotation; compare |w| to 1.
+    # q and -q are the same rotation, so compare |w| with 1. For a rotation of angle
+    # a, 1 - |w| is about a^2 / 8, so tol^2 flags rotations above about 2.8 * tol rad.
     rot = settings.check_rotation and (1.0 - abs(rot_quat.w)) > tol * tol
     scale = settings.check_scale and any(abs(v - 1.0) > tol for v in scale_vals)
     negative = any(v < 0.0 for v in scale_vals)
     return loc, rot, scale, negative
 
 
+def _flagged(flags, settings):
+    """Whether the result of ``check_object()`` means the object belongs in the list."""
+    loc, rot, scale, negative = flags
+    return loc or rot or scale or (negative and settings.check_scale)
+
+
+def is_flagged(obj, settings):
+    """True if ``obj`` has an unapplied transform the settings ask about."""
+    return _flagged(check_object(obj, settings), settings)
+
+
 def candidate_objects(context, settings):
+    """Yield the objects a scan should look at: scene or selection, filtered by type/visibility."""
     objs = context.selected_objects if settings.selected_only else context.scene.objects
     for obj in objs:
         if obj.type not in settings.object_types:
@@ -90,12 +129,8 @@ def candidate_objects(context, settings):
         yield obj
 
 
-def is_flagged(obj, settings):
-    loc, rot, scale, negative = check_object(obj, settings)
-    return loc or rot or scale or (negative and settings.check_scale)
-
-
 def rescan(context):
+    """Rebuild the scene's result list (sorted by name) and return how many objects are flagged."""
     settings = context.scene.transforms_checker
     settings.results.clear()
     for obj in sorted(candidate_objects(context, settings), key=lambda o: o.name):
@@ -108,24 +143,122 @@ def rescan(context):
 
 
 def live_results(settings):
-    """Result entries whose object still exists and is still flagged."""
+    """Objects from the last scan that still exist and are still flagged now."""
     return [it.obj for it in settings.results
             if it.obj is not None and is_flagged(it.obj, settings)]
+
+
+# ---------------------------------------------------------------------------
+# Applying
+# ---------------------------------------------------------------------------
+
+_DELTA_DEFAULTS = (
+    ("delta_location", (0.0, 0.0, 0.0)),
+    ("delta_rotation_euler", (0.0, 0.0, 0.0)),
+    ("delta_rotation_quaternion", (1.0, 0.0, 0.0, 0.0)),
+    ("delta_scale", (1.0, 1.0, 1.0)),
+)
+
+
+def _fold_deltas(obj):
+    """Move delta transforms into the regular ones, keeping the object where it is.
+
+    ``transform_apply`` ignores deltas, so they are folded in first. Returns the
+    exact previous property values, which ``_restore_deltas()`` puts back.
+    """
+    saved = {a: tuple(getattr(obj, a)) for a in _SAVED_ATTRS}
+    mb = obj.matrix_basis.copy()
+    for attr, value in _DELTA_DEFAULTS:
+        setattr(obj, attr, value)
+    obj.matrix_basis = mb
+    return saved
+
+
+# Restored as raw values: going back through a matrix could change the euler angles.
+_SAVED_ATTRS = ("location", "rotation_euler", "rotation_quaternion",
+                "rotation_axis_angle", "scale") + tuple(a for a, _ in _DELTA_DEFAULTS)
+
+
+def _restore_deltas(obj, saved):
+    for attr, value in saved.items():
+        setattr(obj, attr, value)
+
+
+def _transform_apply(context, objs, settings):
+    """Run Blender's Apply Transform on exactly ``objs`` (not the user's selection)."""
+    with context.temp_override(
+        selected_editable_objects=objs,
+        selected_objects=objs,
+        active_object=objs[0],
+        object=objs[0],
+    ):
+        bpy.ops.object.transform_apply(
+            location=settings.check_location,
+            rotation=settings.check_rotation,
+            scale=settings.check_scale,
+            isolate_users=settings.isolate_users,
+        )
+
+
+def _blender_error(exc):
+    """The first 'Error: ...' line Blender put in an operator RuntimeError."""
+    for line in str(exc).splitlines():
+        if "Error: " in line:
+            return line.split("Error: ", 1)[1].strip()
+    return str(exc).strip()
+
+
+def _depth(obj):
+    d = 0
+    while obj.parent is not None:
+        obj, d = obj.parent, d + 1
+    return d
+
+
+def apply_transforms(context, objs, settings):
+    """Apply the enabled transforms to ``objs``. Returns ``{name: reason}`` for refusals.
+
+    All objects go to Blender in one call. Blender aborts the whole call if it
+    refuses any one object (location/rotation on text objects and 2D curves;
+    "Make Single User" when shared data is mixed with other objects), so on
+    failure the objects are retried one at a time, parents first so applying a
+    parent does not undo an already applied child. Refused objects keep their
+    original transforms and deltas.
+    """
+    saved = {o.name: _fold_deltas(o) for o in objs} if settings.include_delta else {}
+    try:
+        _transform_apply(context, objs, settings)
+        return {}
+    except RuntimeError:
+        pass  # Blender changed nothing ("aborting"); retry one by one below.
+
+    refused = {}
+    for o in sorted(objs, key=_depth):
+        try:
+            _transform_apply(context, [o], settings)
+        except RuntimeError as exc:
+            refused[o.name] = _blender_error(exc)
+            if o.name in saved:
+                _restore_deltas(o, saved[o.name])
+    return refused
 
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
 
+# One row of the result list: a pointer, so renaming the object keeps the row valid.
 class TC_ResultItem(PropertyGroup):
     obj: PointerProperty(type=bpy.types.Object)
 
 
 def _settings_changed(self, context):
+    # Update callback for every option: keep the list current once a scan has run.
     if self.scanned:
         rescan(context)
 
 
+# All options and the result list, stored per scene as Scene.transforms_checker.
 class TC_Settings(PropertyGroup):
     check_location: BoolProperty(name="Location", default=True, update=_settings_changed)
     check_rotation: BoolProperty(name="Rotation", default=True, update=_settings_changed)
@@ -154,11 +287,12 @@ class TC_Settings(PropertyGroup):
 
     results: CollectionProperty(type=TC_ResultItem)
     active_index: IntProperty(default=0)
-    scanned: BoolProperty(default=False)
+    scanned: BoolProperty(default=False)  # False until the first scan, and after Clear
 
 
 # ---------------------------------------------------------------------------
 # Operators
+# (No class docstrings: Blender would show them as tooltips. bl_description is the tooltip.)
 # ---------------------------------------------------------------------------
 
 class TC_OT_scan(Operator):
@@ -176,6 +310,18 @@ class TC_OT_scan(Operator):
         return {"FINISHED"}
 
 
+def _select_only(context, objs):
+    # Replace the selection with objs; the first becomes active. Switches to Object Mode.
+    if context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for o in context.view_layer.objects:
+        o.select_set(False)
+    for o in objs:
+        o.select_set(True)
+    if objs:
+        context.view_layer.objects.active = objs[0]
+
+
 class TC_OT_select(Operator):
     bl_idname = "transforms_checker.select"
     bl_label = "Select Flagged"
@@ -184,39 +330,33 @@ class TC_OT_select(Operator):
 
     def execute(self, context):
         settings = context.scene.transforms_checker
-        objs = live_results(settings)
-        if context.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-        for o in context.view_layer.objects:
-            o.select_set(False)
-        selected = [o for o in objs if o.name in context.view_layer.objects and o.visible_get()]
-        for o in selected:
-            o.select_set(True)
-        if selected:
-            context.view_layer.objects.active = selected[0]
+        # Hidden objects and objects outside this view layer cannot be selected.
+        selected = [o for o in live_results(settings)
+                    if o.name in context.view_layer.objects and o.visible_get()]
+        _select_only(context, selected)
         self.report({"INFO"}, f"Selected {len(selected)} object(s)")
         return {"FINISHED"}
 
 
+# Used by the list rows: clicking a name selects that object.
 class TC_OT_select_one(Operator):
     bl_idname = "transforms_checker.select_one"
     bl_label = "Select Object"
     bl_description = "Select and make this object active"
     bl_options = {"REGISTER", "UNDO"}
 
-    name: bpy.props.StringProperty()
+    name: StringProperty()
 
     def execute(self, context):
         obj = bpy.data.objects.get(self.name)
         if obj is None or obj.name not in context.view_layer.objects:
             return {"CANCELLED"}
-        if context.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-        for o in context.view_layer.objects:
-            o.select_set(False)
-        obj.select_set(True)
-        context.view_layer.objects.active = obj
+        _select_only(context, [obj])
         return {"FINISHED"}
+
+
+def _name_list(names, limit=5):
+    return ", ".join(names[:limit]) + (", ..." if len(names) > limit else "")
 
 
 class TC_OT_apply(Operator):
@@ -236,6 +376,7 @@ class TC_OT_apply(Operator):
         objs = []
         skipped = []
         for o in live_results(settings):
+            # Linked/overridden objects can't be edited; shared data needs "Make Single User".
             if o.library or o.override_library or o.name not in context.view_layer.objects:
                 skipped.append(o.name)
                 continue
@@ -244,45 +385,32 @@ class TC_OT_apply(Operator):
                 continue
             objs.append(o)
 
-        if objs:
-            # Delta transforms are not touched by transform_apply; fold them in first.
-            if settings.include_delta:
-                for o in objs:
-                    mb = o.matrix_basis.copy()
-                    o.delta_location = (0, 0, 0)
-                    o.delta_rotation_euler = (0, 0, 0)
-                    o.delta_rotation_quaternion = (1, 0, 0, 0)
-                    o.delta_scale = (1, 1, 1)
-                    o.matrix_basis = mb
-
-            with context.temp_override(
-                selected_editable_objects=objs,
-                selected_objects=objs,
-                active_object=objs[0],
-                object=objs[0],
-            ):
-                bpy.ops.object.transform_apply(
-                    location=settings.check_location,
-                    rotation=settings.check_rotation,
-                    scale=settings.check_scale,
-                    isolate_users=settings.isolate_users,
-                )
+        refused = apply_transforms(context, objs, settings) if objs else {}
 
         rescan(context)
-        msg = f"Applied transforms on {len(objs)} object(s)"
+        # Blender silently leaves some types as they are (cameras, lights, volumes):
+        # count anything still flagged as not applied rather than trusting the call.
+        still = {o.name for o in live_results(settings)}
+        not_applied = [o.name for o in objs if o.name in still and o.name not in refused]
+        applied = len(objs) - len(refused) - len(not_applied)
+
+        msg = f"Applied transforms on {applied} object(s)"
         if skipped:
-            msg += f"; skipped {len(skipped)} (linked or multi-user data): " + ", ".join(skipped[:5])
-            if len(skipped) > 5:
-                msg += ", ..."
-            self.report({"WARNING"}, msg)
-        else:
-            self.report({"INFO"}, msg)
+            msg += f"; skipped {len(skipped)} (linked or multi-user data): " + _name_list(skipped)
+        if refused:
+            reasons = sorted(set(refused.values()))
+            msg += f"; Blender refused {len(refused)}: " + _name_list(sorted(refused))
+            msg += " (" + reasons[0] + (" ..." if len(reasons) > 1 else "") + ")"
+        if not_applied:
+            msg += f"; unchanged by Blender {len(not_applied)}: " + _name_list(not_applied)
+        self.report({"WARNING"} if (skipped or refused or not_applied) else {"INFO"}, msg)
         return {"FINISHED"}
 
 
 class TC_OT_clear(Operator):
     bl_idname = "transforms_checker.clear"
     bl_label = "Clear Results"
+    bl_description = "Empty the result list"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -296,20 +424,24 @@ class TC_OT_clear(Operator):
 # UI
 # ---------------------------------------------------------------------------
 
-_ICONS = None
+_ICONS = None  # every valid icon name, filled on first use
 
 
 def object_icon(obj):
+    """Outliner icon for the object's type, or a generic one if Blender has none by that name."""
     global _ICONS
     if _ICONS is None:
         _ICONS = set(bpy.types.UILayout.bl_rna.functions["prop"]
                      .parameters["icon"].enum_items.keys())
+    # e.g. LIGHT_PROBE -> OUTLINER_OB_LIGHTPROBE
     for name in (f"OUTLINER_OB_{obj.type}", f"OUTLINER_OB_{obj.type.replace('_', '')}"):
         if name in _ICONS:
             return name
     return "OBJECT_DATA"
 
 
+# One row per scanned object: clickable name, then L / R / S letters for what is
+# still unapplied, a warning icon for negative scale, or a checkmark once fixed.
 class TC_UL_results(UIList):
     bl_idname = "TC_UL_results"
 
@@ -341,6 +473,7 @@ class TC_UL_results(UIList):
             flags.label(text="", icon="ERROR")
 
     def filter_items(self, context, data, propname):
+        # Hide rows whose object was deleted; keep the stored order.
         items = getattr(data, propname)
         flt_flags = [self.bitflag_filter_item if it.obj is not None else 0 for it in items]
         return flt_flags, []
@@ -423,7 +556,3 @@ def unregister():
     del bpy.types.Scene.transforms_checker
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-
-
-if __name__ == "__main__":
-    register()

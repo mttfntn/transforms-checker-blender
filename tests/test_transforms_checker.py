@@ -276,6 +276,65 @@ class TestApply(Base):
         bpy.context.view_layer.update()
         assert_vecs_close(self, world_verts(c), before)
 
+    # --- Regressions: objects Blender refuses must not stop the others ---------
+
+    def make_text(self, name):
+        return make_object(name, bpy.data.curves.new(name, "FONT"))
+
+    def make_2d_curve(self, name):
+        cu = bpy.data.curves.new(name, "CURVE")  # dimensions default to 2D
+        cu.splines.new("POLY").points.add(2)
+        return make_object(name, cu)
+
+    def test_text_object_does_not_block_others(self):
+        m, t = make_mesh("m"), self.make_text("t")
+        m.location = t.location = (1, 2, 3)
+        before = world_verts(m)
+        self.assertEqual(self.apply(), {"FINISHED"})
+        self.assertEqual(tuple(m.location), (0, 0, 0))
+        assert_vecs_close(self, world_verts(m), before)
+        self.assertEqual(tuple(t.location), (1, 2, 3))
+        self.assertEqual(flagged_names(), ["t"])
+
+    def test_2d_curve_refused_keeps_deltas(self):
+        m, c = make_mesh("m"), self.make_2d_curve("c")
+        m.rotation_euler.z = c.rotation_euler.z = 0.5
+        c.delta_location = (0, 0, 2)
+        self.apply()
+        self.assertEqual(tuple(m.rotation_euler), (0, 0, 0))
+        self.assertAlmostEqual(c.rotation_euler.z, 0.5, places=6)
+        self.assertEqual(tuple(c.delta_location), (0, 0, 2))
+        self.assertEqual(tuple(c.location), (0, 0, 0))
+
+    def test_isolate_users_with_other_objects(self):
+        a = make_mesh("a")
+        b = make_mesh("b", data=a.data)
+        c = make_mesh("c")
+        a.scale = c.scale = (2, 2, 2)
+        settings().isolate_users = True
+        before = world_verts(a)
+        self.assertEqual(self.apply(), {"FINISHED"})
+        self.assertEqual(tuple(a.scale), (1, 1, 1))
+        self.assertEqual(tuple(c.scale), (1, 1, 1))
+        self.assertNotEqual(a.data, b.data)
+        assert_vecs_close(self, world_verts(a), before)
+        self.assertEqual(flagged_names(), [])
+
+    def test_one_by_one_fallback_parents_first(self):
+        # The text object forces the one-at-a-time path; the child sorts before its parent.
+        child, parent = make_mesh("a_child"), make_mesh("z_parent")
+        child.parent = parent
+        parent.scale = (2, 2, 2)
+        parent.rotation_euler.z = 0.7
+        child.location = (1, 0, 0)
+        child.scale = (0.5, 1, 1)
+        self.make_text("t").location.x = 1
+        before = world_verts(child)
+        self.apply()
+        self.assertEqual(parent.matrix_basis, Matrix.Identity(4))
+        assert_vecs_close(self, world_verts(child), before)
+        self.assertEqual(flagged_names(), ["t"])
+
     def test_nothing_to_apply(self):
         make_mesh("a")
         self.assertEqual(self.apply(), {"FINISHED"})
