@@ -514,17 +514,26 @@ class TC_PT_main(Panel):
         if not settings.scanned:
             return
 
-        flagged = live_results(settings)
+        # One check per object per redraw (the panel redraws on every hover).
+        flagged = 0
+        any_negative = False
+        for it in settings.results:
+            if it.obj is None:
+                continue
+            flags = check_object(it.obj, settings)
+            if _flagged(flags, settings):
+                flagged += 1
+                any_negative = any_negative or flags[3]
         if not flagged:
             layout.label(text="All transforms applied", icon="CHECKMARK")
             return
 
-        layout.label(text=f"{len(flagged)} object(s) not applied", icon="ERROR")
+        layout.label(text=f"{flagged} object(s) not applied", icon="ERROR")
         layout.template_list("TC_UL_results", "", settings, "results",
                              settings, "active_index", rows=6)
         layout.label(text="L = location  R = rotation  S = scale", icon="INFO")
 
-        if any(check_object(o, settings)[3] for o in flagged):
+        if any_negative:
             layout.label(text="Warning icon = negative scale", icon="ERROR")
 
         row = layout.row(align=True)
