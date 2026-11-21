@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "transforms_checker"
+version = "1.0.0"
+name = "Transforms Checker"
+tagline = "Find and apply unapplied object location, rotation and scale"
+maintainer = "Matteo Fontana"
+type = "add-on"
+website = "https://github.com/mttfntn/transforms-checker-blender"
+tags = ["Object"]
+
+# Supported: Blender 5.3.x only (max is exclusive).
+blender_version_min = "5.3.0"
+blender_version_max = "5.4.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Matteo Fontana"]
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", "/.*"]
