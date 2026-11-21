@@ -1,0 +1,115 @@
+# Tests on every push and pull request; a pushed vX.Y.Z tag also builds the
+# extension and publishes a GitHub release with the zip attached.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Supported Blender versions: 5.3 only (see transforms_checker/blender_manifest.toml).
+  BLENDER_VERSION: "5.3.0"
+  BLENDER_SERIES: "5.3"
+  BLENDER_SHA256: "dacb8264197a3f7fda6001285a5a506fc97ee943881261c2c3bd63c882f22e05"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Blender
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: blender-dl
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64-${{ env.BLENDER_SHA256 }}
+
+      - name: Download Blender (with retries and official mirrors)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -u
+          file="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          mkdir -p blender-dl
+          for base in \
+            "https://download.blender.org/release" \
+            "https://mirrors.ocf.berkeley.edu/blender/release" \
+            "https://ftp.nluug.nl/pub/graphics/blender/release" \
+            "https://mirror.clarkson.edu/blender/release"; do
+            url="$base/Blender${BLENDER_SERIES}/$file"
+            echo "Trying $url"
+            if curl -fL --retry 4 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+                 -A "Mozilla/5.0 (X11; Linux x86_64)" -o "blender-dl/$file" "$url" \
+               && echo "${BLENDER_SHA256}  blender-dl/$file" | sha256sum -c -; then
+              exit 0
+            fi
+            rm -f "blender-dl/$file"
+          done
+          echo "::error::Could not download $file from any mirror"
+          exit 1
+
+      - name: Unpack Blender
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 \
+            libegl1 libxkbcommon0 libsm6 libice6
+          tar -xf blender-dl/blender-*.tar.xz
+          echo "BLENDER=$PWD/$(ls -d blender-*-linux-x64)/blender" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: python3 tests/run.py
+
+      - name: Build and validate extension
+        run: python3 tools/build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transforms_checker-zip
+          path: dist/*.zip
+          retention-days: 3
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # actions/checkout fetches the commit, not the annotated tag object, so the
+      # tag message would come back empty. Fetch the tag itself.
+      - name: Fetch tag
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+      - name: Check tag matches manifest version
+        run: |
+          manifest=$(sed -n 's/^version = "\(.*\)"/\1/p' transforms_checker/blender_manifest.toml)
+          if [ "v$manifest" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match manifest version $manifest"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: transforms_checker-zip
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::Tag $GITHUB_REF_NAME has no message; create it with git tag -a"
+            exit 1
+          fi
+          cat notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --title "Transforms Checker $GITHUB_REF_NAME" --notes-file notes.md
