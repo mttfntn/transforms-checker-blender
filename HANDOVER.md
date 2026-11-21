@@ -154,3 +154,8 @@ default path in `tests/run.py`, and the Blender badge; then run the tests on it.
 - Rotation tolerance is on `1 - |w|`, so the smallest flagged angle is about
   `2.8 × tolerance` radians, not `tolerance`.
 - CI covers Linux only; the code has no platform-specific parts.
+- CI uploads no workflow artifacts on purpose: the GitHub account's artifact storage
+  quota is shared with other repos and was full on the first run. The release is
+  published from the same job that tested and built the zip.
+- `download.blender.org` refuses GitHub's machines; CI falls back to official
+  mirrors and verifies the pinned SHA-256, so any mirror is safe.
