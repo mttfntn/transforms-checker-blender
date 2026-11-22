@@ -1,10 +1,10 @@
 # Transforms Checker
 
-![Blender 5.3](https://img.shields.io/badge/Blender-5.3-E87D0D?logo=blender&logoColor=white)
-![Release](https://img.shields.io/badge/release-v1.0.0-blue)
+[![Blender](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmttfntn%2Ftransforms-checker-blender%2Fmain%2Ftransforms_checker%2Fblender_manifest.toml&query=%24.blender_version_min&label=Blender&color=E87D0D&logo=blender&logoColor=white)](https://www.blender.org/download/)
+[![Release](https://img.shields.io/github/v/release/mttfntn/transforms-checker-blender)](https://github.com/mttfntn/transforms-checker-blender/releases/latest)
 [![Tests](https://github.com/mttfntn/transforms-checker-blender/actions/workflows/ci.yml/badge.svg)](https://github.com/mttfntn/transforms-checker-blender/actions/workflows/ci.yml)
-![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
-![Python](https://img.shields.io/badge/language-Python-3776AB?logo=python&logoColor=white)
+[![License](https://img.shields.io/github/license/mttfntn/transforms-checker-blender)](LICENSE)
+[![Language](https://img.shields.io/github/languages/top/mttfntn/transforms-checker-blender)](https://github.com/mttfntn/transforms-checker-blender)
 
 A Blender extension that finds objects whose **location, rotation or scale has
 not been applied**, lists them, and can select them or apply their transforms.

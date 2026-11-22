@@ -46,13 +46,13 @@ Blender lookup: `--blender`, `$BLENDER`, `PATH`, then `C:\Program Files\Blender 
 
 ## Release checklist
 
-1. Bump `version` in the manifest; update the static release badge in README.md (repo is private).
+1. Bump `version` in the manifest (the README badges read it and the release themselves).
 2. `python tests/run.py` passes; commit; push `main`; CI green.
 3. `git tag -a vX.Y.Z -m "notes"` (annotated; the message becomes the release notes); `git push origin vX.Y.Z`.
 4. CI (same job): test → build → fetch tag → check tag == manifest version → `gh release create` with the zip.
 
 ## Git
 
-- Remote `origin` = https://github.com/mttfntn/transforms-checker-blender (private), branch `main`.
+- Remote `origin` = https://github.com/mttfntn/transforms-checker-blender (public), branch `main`.
 - Workflow `.github/workflows/ci.yml`: one job; Blender 5.3.0 linux tarball, sha256-pinned, 4 official mirrors with retries (download.blender.org refuses CI; the Berkeley mirror served it), cached. No artifacts uploaded: the account artifact quota is shared and was full. Release steps run in the same job for tags.
 - Small commits; end messages with the Co-Authored-By trailer if an AI wrote them.

@@ -16,7 +16,7 @@ It is an original project, not a fork, so there is no upstream to merge from.
   elsewhere put `blender` on `PATH`, set `$BLENDER`, or pass `--blender PATH`.
 - **Python 3** on the host to run the helper scripts (they only launch Blender).
 - `git` and, for releases, push access to
-  `https://github.com/mttfntn/transforms-checker-blender` (private).
+  `https://github.com/mttfntn/transforms-checker-blender` (public).
 
 ## How the code is organized
 
@@ -110,8 +110,7 @@ combinations. The output is deterministic (two runs of the same code are byte-id
 ## How to make a release
 
 1. Bump `version` in `transforms_checker/blender_manifest.toml` (e.g. `1.0.1`).
-2. Update the static **release** badge in `README.md` (the repo is private, so
-   shields.io can't read the version; this badge is updated by hand).
+2. Nothing to change in `README.md`: its release, license and language badges read GitHub, and the Blender badge reads the manifest.
 3. Run the tests, commit, push to `main`, and wait for CI to pass.
 4. Create an **annotated** tag; its message becomes the release notes:
    ```
